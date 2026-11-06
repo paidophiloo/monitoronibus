@@ -25,6 +25,8 @@ import {
 import { fleet } from "./fleet";
 import { Scene, type CameraAction } from "./scene";
 import { ShiftReview } from "./shift-review";
+import { OperationFeed, SimulationControls, simulationPhaseLabel, useDemoOperation } from "./operation-demo";
+import { sampleSimulation } from "./simulation";
 
 import { observedVehicles, useObservations, type Mode } from "./observations";
 
@@ -94,6 +96,8 @@ function App() {
   const noData = !demo && !vehicles.length;
   const vehicle = vehicles.find((item) => item.id === selected);
   const reviewing = panel === "shift";
+  const operation = useDemoOperation(demo && !reviewing && ready && !failed3d);
+  const demoPhase = demo && vehicle ? sampleSimulation(vehicle, operation.elapsed).phase : undefined;
   const reviewEntry = useRef<HTMLButtonElement>(null);
   const reviewRegion = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -208,6 +212,7 @@ function App() {
               onFailure={onFailure}
               demo={demo}
               area={area}
+              simulation={demo ? operation.scene : undefined}
             />
             {!ready && !failed3d && (
               <div className="load-label" role="status">
@@ -272,6 +277,7 @@ function App() {
                 </button>
               </div>
             )}
+            {demo && !reviewing && ready && !failed3d && <SimulationControls operation={operation} />}
             <div className="viewport-footer">
               <span className="view-mode">3D</span>
               <span>Arraste para girar · botão direito para deslocar</span>
@@ -309,6 +315,7 @@ function App() {
                 </div>
               </div>
             )}
+            {demo && <OperationFeed elapsed={operation.elapsed} />}
             <section className="info">
               <span className="eyebrow">
                 {panel === "fleet" ? "VEÍCULOS DA CENA" : "VISÃO DO PÁTIO"}
@@ -331,7 +338,7 @@ function App() {
                         <strong>{vehicles.length} veículos</strong>
                         <small>
                           {demo
-                            ? "Modelos na cena DEMO"
+                            ? "Frota do cenário DEMO"
                             : "Observações na área"}
                         </small>
                       </div>
@@ -374,12 +381,12 @@ function App() {
                       </p>
                       {demo ? (
                         <>
-                          <p>
+                          {demoPhase === "parked" && <p>
                             Baia ilustrativa <span>{vehicle.bay}</span>
-                          </p>
+                          </p>}
                           <span className="status">
                             <ArrowDownRight size={14} />
-                            {vehicle.status} · DEMO
+                            {demoPhase ? simulationPhaseLabel[demoPhase] : vehicle.status} · DEMO
                           </span>
                         </>
                       ) : (
@@ -516,7 +523,9 @@ function App() {
                 <small>
                   {mode === "DEMO"
                     ? "Sem horário de GPS real"
-                    : "Fonte prevista: SPTrans Olho Vivo"}
+                    : result?.transport === "websocket" && !result.failed
+                      ? "SPTrans Olho Vivo · canal WebSocket"
+                      : "SPTrans Olho Vivo · consulta HTTP"}
                 </small>
               </div>
             </div>
@@ -553,7 +562,7 @@ function App() {
           </button>
           <h2 id="help-title">Origem dos dados</h2>
           <p>
-            <strong>DEMO</strong> apresenta veículos e baia ilustrativos.{" "}
+            <strong>DEMO</strong> simula manobras e passagens na portaria.{" "}
             <strong>LIVE</strong> exige observações autenticadas da SPTrans.{" "}
             <strong>REPLAY</strong> exige histórico registrado e verificado.
           </p>

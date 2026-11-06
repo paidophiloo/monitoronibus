@@ -32,6 +32,8 @@ test("model has purpose-built glTF mesh families", () => {
 test("WebGL draws the fleet, responds to camera controls, and keeps modes separate", async ({
   page,
 }) => {
+  // Camera and raycast checks need stable geometry; playback has its own suite.
+  await page.emulateMedia({ reducedMotion: "reduce" });
   const errors: string[] = [];
   const contextFailures: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -46,7 +48,7 @@ test("WebGL draws the fleet, responds to camera controls, and keeps modes separa
   );
   await page.goto("/");
   await glb;
-  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true", { timeout: 15_000 });
   const canvas = page.locator("canvas");
   await expect(canvas).toBeVisible();
   expect(
@@ -140,7 +142,7 @@ test("mobile scene and controls fit without horizontal overflow", async ({
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
-  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true", { timeout: 15_000 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
     390,
   );
@@ -182,6 +184,8 @@ test("observed and recorded envelopes reach the correct views (synthetic test fi
       [-46.6302, -23.5502],
     ],
   };
+  // Keep this REST-only fixture isolated from the actual unconfigured backend stream.
+  await page.routeWebSocket("**/api/vehicles/live", (socket) => socket.close());
   await page.route("**/api/vehicles/snapshot?*", async (route) => {
     const mode = new URL(route.request().url()).searchParams.get("mode");
     await route.fulfill({

@@ -18,3 +18,10 @@
 
 - A captura `shift-import-mapped.png` mostra dois arquivos sintéticos com cabeçalhos em português e mapeamento explícito. Os testes conferem datas locais com offset, preservação de prefixos com zero à esquerda e isolamento entre entrada e saída de portaria.
 - O Chromium também verifica que guardar um turno é opcional, que a reabertura recupera as conclusões e que a exclusão confirmada limpa o turno e seus apontamentos. A inspeção do armazenamento verifica que o nome do arquivo original e as colunas sem uso ficam fora dos dados guardados.
+
+## Simulação e canal LIVE
+
+- `live-simulation-demo.png` registra o ônibus GLB em manobra. `live-simulation-events.png` registra a portaria e o diário após os cruzamentos. `live-simulation-mobile.png` cobre a versão móvel.
+- Os testes acompanham a posição projetada do ônibus durante o avanço, conferem que a pausa mantém o relógio e a posição, e verificam reinício, movimento reduzido e isolamento dos modos de dados.
+- O Chromium conecta ao WebSocket do FastAPI pela mesma origem e recupera a consulta HTTP quando o canal é interrompido. Os testes de API exercitam sessão, cookies, perímetro, timestamps, origem do socket e falhas do provedor com respostas controladas.
+- A credencial real do Olho Vivo não estava disponível neste ambiente. O Compose foi inspecionado estaticamente. A execução em contêiner depende de Docker e a implantação remota requer uma política de acesso e TLS.

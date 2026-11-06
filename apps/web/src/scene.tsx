@@ -1,5 +1,5 @@
 import { Html, OrbitControls, useGLTF } from "@react-three/drei";
-import { Canvas, useThree } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { BusFront } from "lucide-react";
 import {
   Component,
@@ -12,6 +12,7 @@ import {
 } from "react";
 import {
   Color,
+  Group,
   Mesh,
   MeshStandardMaterial,
   OrthographicCamera,
@@ -22,6 +23,11 @@ import {
 import type { Vehicle } from "./fleet";
 import { localPoint, type Area } from "./observations";
 import { Scenery } from "./scenery";
+import {
+  sampleSimulation,
+  SIMULATION_DURATION,
+  SIMULATION_GATE,
+} from "./simulation";
 
 const MODEL = "/models/sp-standard-bus.glb";
 const DEFAULT_TARGET = new Vector3(0, 0.6, 0);
@@ -34,12 +40,54 @@ export type CameraAction = {
   vehicle?: Vehicle;
 };
 
+export type SceneSimulation = {
+  running: boolean;
+  speed: number;
+  elapsed: { current: number };
+};
+
+function SimulationClock({ simulation }: { simulation?: SceneSimulation }) {
+  const invalidate = useThree((state) => state.invalidate);
+  const previous = useRef<number | null>(null);
+  const running = simulation?.running ?? false;
+  const speed = simulation?.speed ?? 1;
+  const elapsed = simulation?.elapsed;
+  // The containing app can replace the control object after seeking while paused.
+  useEffect(() => {
+    invalidate();
+  }, [invalidate, simulation]);
+  useEffect(() => {
+    previous.current = null;
+  }, [elapsed, running, speed]);
+  useFrame(({ clock }) => {
+    if (!elapsed) return;
+    const now = clock.elapsedTime;
+    if (running && Number.isFinite(speed) && speed > 0) {
+      if (previous.current !== null && elapsed.current < SIMULATION_DURATION) {
+        // Don't jump the animation when returning from a background tab.
+        elapsed.current = Math.min(
+          SIMULATION_DURATION,
+          elapsed.current +
+            Math.min(0.12, Math.max(0, now - previous.current)) * speed,
+        );
+      }
+      previous.current = now;
+      if (elapsed.current < SIMULATION_DURATION) invalidate();
+    } else {
+      previous.current = null;
+    }
+  }, -2);
+  return null;
+}
+
 function CameraRig({
   action,
   extent,
+  elapsed,
 }: {
   action: CameraAction;
   extent: number;
+  elapsed?: SceneSimulation["elapsed"];
 }) {
   const controls = useRef<ComponentRef<typeof OrbitControls>>(null);
   const { camera, invalidate, size } = useThree();
@@ -57,7 +105,12 @@ function CameraRig({
         .multiplyScalar(Math.max(1, extent / 27));
       camera.zoom = base;
     } else if (action.vehicle) {
-      orbit.target.set(action.vehicle.x, 1.3, action.vehicle.z);
+      const pose = elapsed
+        ? sampleSimulation(action.vehicle, elapsed.current)
+        : action.vehicle;
+      const unavailable = "visible" in pose && !pose.visible;
+      const target = unavailable ? SIMULATION_GATE : pose;
+      orbit.target.set(target.x, 1.3, target.z);
       const offset =
         action.type === "top"
           ? new Vector3(0.01, 44, 0.01)
@@ -76,7 +129,7 @@ function CameraRig({
     camera.updateProjectionMatrix();
     orbit.update();
     invalidate();
-  }, [action, base, camera, extent, invalidate]);
+  }, [action, base, camera, elapsed, extent, invalidate]);
   return (
     <OrbitControls
       ref={controls}
@@ -95,13 +148,60 @@ function Bus({
   selected,
   onSelect,
   showTag,
+  elapsed,
 }: {
   vehicle: Vehicle;
   selected: boolean;
   onSelect: (id: string) => void;
   showTag: boolean;
+  elapsed?: SceneSimulation["elapsed"];
 }) {
   const { scene } = useGLTF(MODEL);
+  const { gl, invalidate } = useThree();
+  const group = useRef<Group>(null);
+  const tag = useRef<HTMLDivElement>(null);
+  const hovering = useRef(false);
+  useEffect(
+    () => () => {
+      if (hovering.current) document.body.style.cursor = "";
+    },
+    [],
+  );
+  useEffect(() => {
+    gl.shadowMap.needsUpdate = true;
+    invalidate();
+  }, [gl, invalidate, vehicle.x, vehicle.z]);
+  // Apply the pose before the default-priority Html overlay projects its tag.
+  useFrame(() => {
+    const bus = group.current;
+    if (!bus) return;
+    const pose = elapsed
+      ? sampleSimulation(vehicle, elapsed.current)
+      : { x: vehicle.x, z: vehicle.z, heading: 0, visible: true };
+    if (
+      bus.position.x !== pose.x ||
+      bus.position.z !== pose.z ||
+      bus.rotation.y !== pose.heading
+    ) {
+      bus.position.set(pose.x, 0.018, pose.z);
+      bus.rotation.y = pose.heading;
+      bus.updateMatrixWorld(true);
+      gl.shadowMap.needsUpdate = true;
+    }
+    if (bus.visible !== pose.visible) {
+      bus.visible = pose.visible;
+      gl.shadowMap.needsUpdate = true;
+    }
+    // Drei's HTML overlays are rendered outside the WebGL scene.
+    if (tag.current && tag.current.hidden === pose.visible) {
+      tag.current.hidden = !pose.visible;
+      tag.current.style.display = pose.visible ? "" : "none";
+    }
+    if (!pose.visible && hovering.current) {
+      document.body.style.cursor = "";
+      hovering.current = false;
+    }
+  }, -1);
   const paint = useMemo(() => {
     const material = new MeshStandardMaterial({
       color: new Color(vehicle.paint),
@@ -124,18 +224,23 @@ function Bus({
     return instance;
   }, [scene, paint]);
   return (
-    <group position={[vehicle.x, 0.018, vehicle.z]}>
+    <group ref={group} position={[vehicle.x, 0.018, vehicle.z]}>
       <primitive
         object={object}
         onClick={(event: { stopPropagation: () => void }) => {
+          if (group.current?.visible === false) return;
           event.stopPropagation();
           onSelect(vehicle.id);
         }}
         onPointerOver={(event: { stopPropagation: () => void }) => {
+          if (group.current?.visible === false) return;
           event.stopPropagation();
+          hovering.current = true;
           document.body.style.cursor = "pointer";
         }}
         onPointerOut={() => {
+          if (!hovering.current) return;
+          hovering.current = false;
           document.body.style.cursor = "";
         }}
       />
@@ -170,7 +275,7 @@ function Bus({
               zIndexRange={[12, 0]}
               style={{ pointerEvents: "none" }}
             >
-              <div className="bus-tag">
+              <div className="bus-tag" ref={tag} data-vehicle-id={vehicle.id}>
                 <BusFront size={18} />
                 <strong>{vehicle.id}</strong>
                 <span>{vehicle.line}</span>
@@ -254,6 +359,7 @@ export function Scene({
   onFailure,
   demo,
   area,
+  simulation,
 }: {
   vehicles: Vehicle[];
   selected: string | null;
@@ -263,7 +369,9 @@ export function Scene({
   onFailure: () => void;
   demo: boolean;
   area?: Area;
+  simulation?: SceneSimulation;
 }) {
+  const demoSimulation = demo ? simulation : undefined;
   const ring = useMemo(
     () =>
       area ? area.ring.map((point) => localPoint(area.origin, point)) : [],
@@ -321,19 +429,25 @@ export function Scene({
           shadow-normalBias={0.025}
           shadow-bias={-0.00015}
         />
-        <CameraRig action={action} extent={extent} />
+        <CameraRig
+          action={action}
+          extent={extent}
+          elapsed={demoSimulation?.elapsed}
+        />
         <Suspense fallback={null}>
+          <SimulationClock simulation={demoSimulation} />
           {demo ? <Scenery /> : <ObservedTerrain ring={ring} extent={extent} />}
           {vehicles.map((vehicle) => (
             <Bus
-              key={vehicle.id}
+              key={`${demo ? "demo" : "observed"}:${vehicle.id}`}
               vehicle={vehicle}
               selected={selected === vehicle.id}
               onSelect={onSelect}
               showTag={action.type !== "top" && action.type !== "profile"}
+              elapsed={demoSimulation?.elapsed}
             />
           ))}
-          <Ready onReady={onReady} />
+          <Ready key={demo ? "demo" : "observed"} onReady={onReady} />
         </Suspense>
       </Canvas>
     </SceneError>

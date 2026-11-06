@@ -9,15 +9,19 @@ import logging
 from pathlib import Path
 import os
 from typing import Literal
+from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .sptrans import Observation, OlhoVivo
 
 logger = logging.getLogger(__name__)
 Coordinates = tuple[float, float]
+MAX_LIVE_CLIENTS = 32
+REPLAY_MAX_BYTES = 12 * 1024 * 1024
 
 
 class Area(BaseModel):
@@ -64,11 +68,18 @@ class Replay(BaseModel):
 
 
 def read_replay(file: Path, key: str) -> Replay:
-    if len(key.encode()) < 32 or file.stat().st_size > 12 * 1024 * 1024:
+    if len(key.encode()) < 32:
         raise ValueError("configuração de replay inválida")
-    raw = file.read_bytes()
-    expected = hmac.new(key.encode(), raw, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(file.with_suffix(file.suffix + ".sig").read_text().strip(), expected):
+    with file.open("rb") as handle:
+        raw = handle.read(REPLAY_MAX_BYTES + 1)
+    if len(raw) > REPLAY_MAX_BYTES:
+        raise ValueError("configuração de replay inválida")
+    with file.with_suffix(file.suffix + ".sig").open("rb") as handle:
+        signature = handle.read(128)
+        if handle.read(1):
+            raise ValueError("assinatura de replay inválida")
+    expected = hmac.new(key.encode(), raw, hashlib.sha256).hexdigest().encode("ascii")
+    if not hmac.compare_digest(signature.strip(), expected):
         raise ValueError("assinatura de replay inválida")
     return Replay.model_validate_json(raw)
 
@@ -79,11 +90,21 @@ class Ingestion:
     records: list[Observation] = field(default_factory=list)
     state: str = "not_configured"
     replay: Replay | None = None
+    revision: int = 0
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    live_clients: int = 0
+    public_origin: str | None = None
+
+    def publish(self):
+        self.revision += 1
+        self.changed.set()
+        self.changed = asyncio.Event()
 
 
 async def poll(ingestion: Ingestion, provider: OlhoVivo, area: Area, company: int | None):
     delay = 15
     while True:
+        previous_state = ingestion.state
         try:
             fresh = await provider.positions(company)
             if not fresh:
@@ -91,23 +112,58 @@ async def poll(ingestion: Ingestion, provider: OlhoVivo, area: Area, company: in
             ingestion.records = [record for record in fresh if area.contains(record.longitude, record.latitude)]
             ingestion.state = "connected"
             delay = 15
+            ingestion.publish()
         except (httpx.HTTPError, ValueError) as error:
             # Error text and traceback may include the secret authentication URL.
             logger.warning("Olho Vivo indisponível (%s)", type(error).__name__)
             ingestion.state = "unavailable"
             delay = min(delay*2, 120)
+            if previous_state != ingestion.state:
+                ingestion.publish()
         await asyncio.sleep(delay)
+
+
+def public_origin_from_env() -> str | None:
+    value = os.getenv("PATIO_PUBLIC_ORIGIN", "").strip()
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.path not in {"", "/"}
+            or parsed.query or parsed.fragment or parsed.port == 0):
+        raise ValueError("PATIO_PUBLIC_ORIGIN deve conter somente a origem HTTP(S)")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def provider_token_from_env() -> str:
+    token = os.getenv("SPTRANS_TOKEN", "").strip()
+    secret_file = os.getenv("SPTRANS_TOKEN_FILE", "").strip()
+    if token or not secret_file:
+        return token
+    try:
+        with Path(secret_file).open("rb") as handle:
+            raw = handle.read(2049)
+        if len(raw) > 2048:
+            raise ValueError
+        return raw.decode("utf-8").strip()
+    except (OSError, ValueError):
+        logger.warning("Arquivo de credencial do Olho Vivo rejeitado")
+        return ""
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ingestion = Ingestion()
+    ingestion = Ingestion(public_origin=public_origin_from_env())
     app.state.ingestion = ingestion
-    token = os.getenv("SPTRANS_TOKEN", "").strip()
+    token = provider_token_from_env()
     area_file = os.getenv("PATIO_AREA_FILE")
     replay_file = os.getenv("PATIO_REPLAY_FILE")
     if area_file:
-        ingestion.area = Area.model_validate_json(Path(area_file).read_bytes())
+        with Path(area_file).open("rb") as handle:
+            raw_area = handle.read(256 * 1024 + 1)
+        if len(raw_area) > 256 * 1024:
+            raise ValueError("PATIO_AREA_FILE excede o tamanho permitido")
+        ingestion.area = Area.model_validate_json(raw_area)
     if replay_file:
         try:
             ingestion.replay = read_replay(Path(replay_file), os.getenv("PATIO_REPLAY_KEY", ""))
@@ -135,6 +191,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Pátio Monitor", version="0.2.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def secure_http_responses(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
 
 
 @app.get("/health")
@@ -169,7 +235,54 @@ def snapshot(ingestion: Ingestion, mode: Literal["LIVE", "REPLAY"], at: datetime
 
 
 @app.get("/api/vehicles/snapshot")
-async def get_snapshot(response: Response, mode: Literal["LIVE", "REPLAY"] = Query(),
+async def get_snapshot(mode: Literal["LIVE", "REPLAY"] = Query(),
                  at: datetime | None = None):
-    response.headers["Cache-Control"] = "no-store"
     return snapshot(app.state.ingestion, mode, at)
+
+
+@app.websocket("/api/vehicles/live")
+async def live_socket(websocket: WebSocket):
+    ingestion: Ingestion = websocket.app.state.ingestion
+    scheme = "https" if websocket.url.scheme == "wss" else "http"
+    origin = ingestion.public_origin or f"{scheme}://{websocket.url.netloc}"
+    if websocket.headers.get("origin") != origin:
+        await websocket.close(code=1008)
+        return
+    if ingestion.live_clients >= MAX_LIVE_CLIENTS:
+        await websocket.close(code=1013)
+        return
+
+    ingestion.live_clients += 1
+    incoming = None
+    change = None
+    try:
+        await websocket.accept()
+        incoming = asyncio.create_task(websocket.receive())
+        last = None
+        while True:
+            change = asyncio.create_task(ingestion.changed.wait())
+            current = snapshot(ingestion, "LIVE", None)
+            key = (ingestion.revision, current["state"])
+            if key != last:
+                await asyncio.wait_for(websocket.send_json(jsonable_encoder(current)), timeout=5)
+                last = key
+
+            # The timeout lets freshness change even when the provider is quiet.
+            done, _ = await asyncio.wait({incoming, change}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+            if incoming in done:
+                if incoming.result()["type"] != "websocket.disconnect":
+                    await websocket.close(code=1008)
+                return
+            change.cancel()
+            with suppress(asyncio.CancelledError):
+                await change
+            change = None
+    except (WebSocketDisconnect, TimeoutError):
+        return
+    finally:
+        ingestion.live_clients -= 1
+        tasks = [task for task in (incoming, change) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)

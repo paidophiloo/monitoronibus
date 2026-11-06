@@ -11,3 +11,6 @@ playwright-report/
 
 # User-supplied moodboards are separate from the shipping code.
 references/
+
+# Runtime configuration and private credentials for local deployment.
+/runtime-data/

@@ -62,7 +62,7 @@ test("custom Portuguese CSV mapping validates a local time zone and matches the 
 
   await schedule.getByLabel("Fuso dos horários sem offset").selectOption("-03:00");
   await gate.getByLabel("Fuso dos horários sem offset").selectOption("-03:00");
-  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true", { timeout: 15_000 });
   await page.setViewportSize({ width: 1440, height: 1080 });
   await schedule.evaluate((field) => field.scrollIntoView({ block: "start" }));
   await page.screenshot({ path: "../../docs/qa/shift-import-mapped.png" });

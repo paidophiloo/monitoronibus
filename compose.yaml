@@ -1,0 +1,36 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Api.Dockerfile
+    environment:
+      SPTRANS_TOKEN_FILE: ${SPTRANS_TOKEN_FILE:-}
+      SPTRANS_COMPANY_ID: ${SPTRANS_COMPANY_ID:-}
+      PATIO_AREA_FILE: ${PATIO_AREA_FILE:-}
+      PATIO_REPLAY_FILE: ${PATIO_REPLAY_FILE:-}
+      PATIO_REPLAY_KEY: ${PATIO_REPLAY_KEY:-}
+      PATIO_PUBLIC_ORIGIN: ${PATIO_PUBLIC_ORIGIN:-}
+    volumes:
+      - ./runtime-data:/run/patio:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Web.Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]

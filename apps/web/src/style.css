@@ -735,11 +735,15 @@ button:disabled {
   .workspace.workspace-review {
     grid-template-columns: minmax(0, 1fr) clamp(310px, 29vw, 382px);
   }
-  .workspace-review > .side {
+  .workspace > .side {
     min-width: 0;
-    max-height: calc(100svh - 132px);
+    max-height: max(575px, calc(100svh - 132px));
     overflow-y: auto;
+    scrollbar-width: thin;
     scrollbar-gutter: stable;
+  }
+  .workspace > .side > * {
+    flex-shrink: 0;
   }
 }
 @media (max-width: 720px) {

@@ -20,11 +20,19 @@ python -m pip install -r services/api/requirements-dev.txt
 python -m uvicorn app.main:app --app-dir services/api --host 127.0.0.1 --port 8000
 ```
 
-Para o build, execute `pnpm build`. Em um deploy, sirva `apps/web/dist` e encaminhe `/api` e `/health` ao FastAPI na mesma origem. O Vite já faz esse proxy em dev e preview. O FastAPI desta entrega usa **um processo** para manter uma sessão e um coletor upstream.
+Para o build, execute `pnpm build`. O Vite encaminha REST, WebSocket e health check ao FastAPI na mesma origem. O FastAPI desta entrega usa **um processo** para manter uma sessão e um coletor upstream.
+
+## Simulação operacional
+
+No **DEMO**, o relógio parte das 06h e percorre um cenário determinístico de 90 segundos simulados. Os ônibus GLB percorrem as vias do pátio, passam pela portaria e retornam à baia. O diário registra as passagens no instante em que o veículo cruza a portaria. O controle permite pausar, avançar no tempo, recomeçar e escolher 1×, 2× ou 4×. A preferência de movimento reduzido inicia o relógio pausado. A revisão de turno também pausa a movimentação para facilitar a inspeção.
+
+O entorno e a operação são ilustrativos. As posições de **LIVE** seguem as observações geográficas recebidas. **REPLAY** usa a captura assinada. Esses modos preservam as horas da fonte e operam separadamente do relógio da simulação.
 
 ## Fechamento de turno
 
 Abra **Revisar turno** no painel lateral para experimentar a fila com dados sintéticos identificados. Selecione uma saída para consultar escala, portaria e posição disponível na cena. Registre uma conclusão e exporte a revisão. O CSV de exportação registra a leitura de portaria e a decisão humana em campos separados.
+
+O conjunto de demonstração da revisão é um caso de conciliação próprio, separado do diário gerado pela simulação 3D.
 
 Para revisar seus dados, carregue um par de CSVs UTF-8 com vírgula ou ponto e vírgula. O painel oferece modelos de ambos.
 
@@ -51,11 +59,19 @@ Os arquivos de entrada são processados no navegador. As conclusões são locais
 | LIVE | SPTrans Olho Vivo, servidor FastAPI e recorte do perímetro fornecido | Adaptador e conexão de UI implementados. Autenticação e cobertura real pendentes |
 | REPLAY | Captura histórica validada e assinada pelo operador | Leitura e busca temporal implementadas. Sem captura histórica fornecida |
 
-Para LIVE, configure **somente no processo FastAPI** as variáveis `SPTRANS_TOKEN` e `PATIO_AREA_FILE`. A variável opcional `SPTRANS_COMPANY_ID` escolhe a consulta de garagem por empresa. A credencial é emitida no [DevPlace da SPTrans](https://www.sptrans.com.br/desenvolvedores/api-do-olho-vivo-guia-de-referencia/). O arquivo de área é JSON com `name`, `source`, `origin` e `ring`. Use pares `[longitude, latitude]` em WGS84 e feche o anel repetindo o primeiro ponto. Registre fonte e licença do perímetro. GPS e perímetro usam a mesma projeção UTM 23S, em metros.
+Para LIVE, configure **somente no processo FastAPI** a credencial via `SPTRANS_TOKEN` ou `SPTRANS_TOKEN_FILE` e defina `PATIO_AREA_FILE`. A variável opcional `SPTRANS_COMPANY_ID` escolhe a consulta de garagem por empresa. A credencial é emitida no [DevPlace da SPTrans](https://www.sptrans.com.br/desenvolvedores/api-do-olho-vivo-guia-de-referencia/). O arquivo de área é JSON com `name`, `source`, `origin` e `ring`. Use pares `[longitude, latitude]` em WGS84 e feche o anel repetindo o primeiro ponto. Registre fonte e licença do perímetro. GPS e perímetro usam a mesma projeção UTM 23S, em metros.
 
 Para REPLAY, configure `PATIO_REPLAY_FILE` e `PATIO_REPLAY_KEY` no servidor. O JSON contém `version: 1`, `source: "sptrans_olhovivo"`, `area` e `observations`, com os campos descritos em [contrato](packages/contracts/README.md). Um arquivo companheiro com sufixo `.json.sig` contém o HMAC-SHA256 hexadecimal dos bytes originais do JSON. Use uma chave privada de pelo menos 32 bytes e assine apenas dados com procedência já verificada. A timeline usa as leituras registradas e mantém seus horários originais.
 
 Os modos de GPS mostram somente a área configurada e posições observadas. O pátio cenográfico é exclusivo do DEMO. O aplicativo não atribui a observações GPS uma baia, direção, telemetria de manutenção ou autorização de saída.
+
+## Execução em contêiner local
+
+Com Docker Compose, crie `runtime-data` na raiz e execute `docker compose up --build`. Abra `http://127.0.0.1:8080`. O Caddy publica a interface apenas no loopback, encaminha a API e faz a atualização WebSocket na mesma origem. Os processos usam UID 10001, sistema de arquivos de contêiner somente leitura e nenhuma capability adicional.
+
+Para ativar LIVE nessa configuração, coloque o token e o perímetro em `runtime-data`, com permissões de leitura para o UID 10001. Copie `.env.example` para `.env` e defina `SPTRANS_TOKEN_FILE=/run/patio/sptrans-token.txt` e `PATIO_AREA_FILE=/run/patio/area.json`. O diretório é montado somente para leitura na API. A interface recebe apenas as observações normalizadas.
+
+O perfil Compose é local. Uma implantação remota exige TLS, autenticação de acesso à aplicação e configuração de `PATIO_PUBLIC_ORIGIN` conforme a origem HTTPS real.
 
 ## Testar e regenerar
 
@@ -71,6 +87,6 @@ Os testes de navegador iniciam a API offline em 8000 e o frontend de produção 
 
 ## Escopo operacional
 
-O build contém câmera, inspeção de malha, sessão SPTrans server-side, polling compartilhado, deduplicação por prefixo, projeção métrica e replay assinado. A sessão usa HTTPS, timeout, renovação após 401/403 e espera crescente em falhas. Observações antigas mantêm o horário original e aparecem sinalizadas.
+O build contém câmera, inspeção de malha, sessão SPTrans server-side, polling compartilhado, deduplicação por prefixo, projeção métrica e replay assinado. A sessão usa HTTPS, timeout, renovação após 401/403 e espera crescente em falhas. O canal `/api/vehicles/live` transmite os snapshots aos navegadores conectados e limita a origem e o número de conexões. A interface recupera dados por HTTP enquanto tenta restabelecer o canal. Observações antigas mantêm o horário original e aparecem sinalizadas.
 
-Permanecem pendentes para operação institucional a validação de um pátio real e da cobertura GPS, modelo georreferenciado, WebSocket, persistência PostgreSQL/PostGIS, retenção, autenticação da plataforma, observabilidade e testes em dispositivos de operadores. O blueprint original registra os marcos de implementação e as integrações restantes. Para a referência visual, use `references/00-APPROVED-visual-target.png` do handoff v3.
+Permanecem pendentes para operação institucional a validação de um pátio real e da cobertura GPS, modelo georreferenciado, persistência PostgreSQL/PostGIS, retenção, autenticação da plataforma, observabilidade e testes em dispositivos de operadores. O blueprint original registra os marcos de implementação e as integrações restantes. Para a referência visual, use `references/00-APPROVED-visual-target.png` do handoff v3.

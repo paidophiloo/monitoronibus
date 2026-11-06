@@ -57,53 +57,111 @@ export function observedVehicles(snapshot?: Snapshot): Vehicle[] {
   });
 }
 
+type ObservationResult = {
+  mode: Mode;
+  data?: Snapshot;
+  failed?: boolean;
+  transport?: "websocket" | "http";
+};
+
+function validateSnapshot(value: unknown, mode: Mode): value is Snapshot {
+  if (typeof value !== "object" || !value) return false;
+  const snapshot = value as Partial<Snapshot>;
+  return snapshot.version === 1 && snapshot.mode === mode &&
+    typeof snapshot.state === "string" && Array.isArray(snapshot.vehicles) &&
+    (snapshot.vehicles.length === 0 || snapshot.source === "sptrans_olhovivo");
+}
+
 export function useObservations(mode: Mode, at: string) {
-  const [result, setResult] = useState<{
-    mode: Mode;
-    data?: Snapshot;
-    failed?: boolean;
-  }>();
+  const [result, setResult] = useState<ObservationResult>();
   useEffect(() => {
     if (mode === "DEMO") return;
     let controller: AbortController | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let socket: WebSocket | undefined;
+    let connected = false;
     let active = true;
+    let retry = 2000;
+
     const refresh = async () => {
-      controller = new AbortController();
+      const request = new AbortController();
+      controller = request;
       const params = new URLSearchParams({ mode });
       if (mode === "REPLAY" && at) params.set("at", at);
-      const deadline = setTimeout(() => controller?.abort(), 7000);
+      const deadline = setTimeout(() => request.abort(), 7000);
       try {
         const response = await fetch("/api/vehicles/snapshot?" + params, {
-          signal: controller.signal,
+          signal: request.signal,
           cache: "no-store",
         });
         if (!response.ok) throw new Error("Provider unavailable");
-        const data: Snapshot = await response.json();
-        if (
-          data.version !== 1 ||
-          data.mode !== mode ||
-          !Array.isArray(data.vehicles)
-        )
-          throw new Error("Invalid snapshot");
-        if (active) setResult({ mode, data });
+        const data: unknown = await response.json();
+        if (!validateSnapshot(data, mode)) throw new Error("Invalid snapshot");
+        if (active && !connected) setResult({ mode, data, transport: "http" });
       } catch {
-        if (active)
+        if (active && !connected) {
           setResult((previous) => ({
             mode,
             data: previous?.mode === mode ? previous.data : undefined,
             failed: true,
+            transport: "http",
           }));
+        }
       } finally {
         clearTimeout(deadline);
-        if (active && mode === "LIVE") timer = setTimeout(refresh, 8000);
+        if (controller === request) controller = undefined;
+        if (active && mode === "LIVE" && !connected) pollTimer = setTimeout(refresh, 8000);
       }
     };
+
+    function connect() {
+      const url = new URL("/api/vehicles/live", window.location.href);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      const connection = new WebSocket(url);
+      socket = connection;
+      const deadline = setTimeout(() => connection.close(), 10_000);
+      connection.onmessage = (event) => {
+        if (!active || socket !== connection) return;
+        try {
+          if (typeof event.data !== "string" || event.data.length > 4_000_000) {
+            throw new Error("Invalid live message");
+          }
+          const data: unknown = JSON.parse(event.data);
+          if (!validateSnapshot(data, "LIVE")) throw new Error("Invalid live snapshot");
+          connected = true;
+          retry = 2000;
+          clearTimeout(deadline);
+          clearTimeout(pollTimer);
+          setResult({ mode, data, transport: "websocket" });
+        } catch {
+          connection.close();
+        }
+      };
+      connection.onerror = () => connection.close();
+      connection.onclose = () => {
+        clearTimeout(deadline);
+        if (!active || socket !== connection) return;
+        const wasConnected = connected;
+        connected = false;
+        if (wasConnected) {
+          setResult((previous) => previous?.mode === mode ? { ...previous, failed: true } : previous);
+          clearTimeout(pollTimer);
+          if (!controller) void refresh();
+        }
+        reconnectTimer = setTimeout(connect, retry);
+        retry = Math.min(retry * 2, 30_000);
+      };
+    }
+
     void refresh();
+    if (mode === "LIVE") connect();
     return () => {
       active = false;
       controller?.abort();
-      clearTimeout(timer);
+      clearTimeout(pollTimer);
+      clearTimeout(reconnectTimer);
+      socket?.close();
     };
   }, [mode, at]);
   return result?.mode === mode ? result : undefined;

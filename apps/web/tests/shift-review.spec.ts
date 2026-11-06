@@ -7,8 +7,9 @@ const missingTrip = /Investigar PM-0610/;
 const swapTrip = /Investigar PM-0615/;
 
 async function openReview(page: Page) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
-  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator(".viewport")).toHaveAttribute("data-ready", "true", { timeout: 15_000 });
   await page.getByRole("button", { name: /Revisar turno/ }).click();
   await expect(page.getByRole("heading", { name: title })).toBeVisible();
 }
