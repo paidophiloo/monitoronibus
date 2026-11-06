@@ -99,7 +99,9 @@ test("imported shift has its own provenance and retains conclusions when reopene
   const scheduleInput = page.getByLabel("Arquivo de escala");
   await scheduleInput.setInputFiles({
     ...scheduleCsv,
-    buffer: Buffer.from("trip_id,vehicle_id\nCSV-001,8 1776\n"),
+    buffer: Buffer.from(
+      "trip_id,vehicle_id,planned_at\nCSV-001,8 1776,2026-11-06T06:30:00\n",
+    ),
   });
   await page.getByLabel("Arquivo de portaria").setInputFiles(gateCsv);
   const submit = page.getByRole("button", { name: "Revisar arquivos" });

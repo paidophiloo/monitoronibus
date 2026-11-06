@@ -13,3 +13,8 @@
 - **Importação e conciliação** o Playwright cobre troca de veículo, horários fora da janela, correspondência ambígua, falta de registros, arquivos inválidos e horário com fuso. A saída de um ônibus pela portaria é uma evidência distinta da partida de uma viagem comercial.
 - **Navegador** o teste percorre a lista de ocorrências, confere o foco da câmera sobre a malha 3D, registra uma conclusão, reimporta o mesmo turno após recarregar e baixa o CSV com a origem marcada. O cenário sintético é isolado de LIVE, REPLAY e dos CSVs importados.
 - **Alcance** as capturas e os testes demonstram o fluxo de revisão. A cobertura das fontes de uma garagem real e a economia de tempo continuam hipóteses de piloto.
+
+## Importação e reabertura
+
+- A captura `shift-import-mapped.png` mostra dois arquivos sintéticos com cabeçalhos em português e mapeamento explícito. Os testes conferem datas locais com offset, preservação de prefixos com zero à esquerda e isolamento entre entrada e saída de portaria.
+- O Chromium também verifica que guardar um turno é opcional, que a reabertura recupera as conclusões e que a exclusão confirmada limpa o turno e seus apontamentos. A inspeção do armazenamento verifica que o nome do arquivo original e as colunas sem uso ficam fora dos dados guardados.

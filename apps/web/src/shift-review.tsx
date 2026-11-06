@@ -13,6 +13,7 @@ import {
   FileUp,
   LogOut,
   Radio,
+  Archive,
   X,
 } from "lucide-react";
 import type { Vehicle } from "./fleet";
@@ -28,6 +29,9 @@ import {
   SHIFT_STATUS_LABELS,
   SHIFT_TOLERANCE_MINUTES,
   exportShiftCsv,
+  inspectShiftCsv,
+  type GateRow,
+  type ScheduleRow,
   parseGateCsv,
   parseScheduleCsv,
   reconcileShift,
@@ -35,6 +39,8 @@ import {
   type ShiftDecision,
   type ShiftStatus,
 } from "./shift-engine";
+import { ShiftImportMapping, type ShiftColumnMapping } from "./shift-import-mapping";
+import { deleteSavedShift, readSavedShift, saveShift, savedShifts } from "./shift-storage";
 import "./shift-review.css";
 
 type ShiftReviewProps = {
@@ -52,7 +58,37 @@ type Dataset = {
   isDemo: boolean;
 };
 
+type ImportedShift = Dataset & {
+  schedule: ScheduleRow[];
+  gate: GateRow[];
+};
+
+type ImportSource = {
+  text: string;
+  inspection: ReturnType<typeof inspectShiftCsv>;
+  columns: ShiftColumnMapping;
+  utcOffset: string;
+};
+
+type ImportDraft = { schedule: ImportSource; gate: ImportSource };
 type Decisions = Record<string, ShiftDecision>;
+
+function hasCanonicalColumns(source: ImportSource, names: string[]) {
+  const headers = new Set(source.inspection.headers.map((name) => name.toLowerCase()));
+  return names.every((name) => headers.has(name));
+}
+
+function importSource(text: string, label: string): ImportSource {
+  try {
+    return { text, inspection: inspectShiftCsv(text), columns: {}, utcOffset: "" };
+  } catch (error) {
+    throw new Error(label + ": " + (error instanceof Error ? error.message : "CSV inválido."));
+  }
+}
+
+function mappingKey(source: ImportSource) {
+  return { columns: Object.entries(source.columns).sort(([a], [b]) => a.localeCompare(b)), utcOffset: source.utcOffset };
+}
 
 const DEMO_DATASET: Dataset = {
   storageKey: "patio-monitor:shift-review:demo:v1",
@@ -111,9 +147,12 @@ function downloadCsv(filename: string, csv: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function datasetStorageKey(schedule: string, gate: string) {
+async function datasetStorageKey(schedule: string, gate: string, mapping?: ImportDraft) {
   try {
-    const bytes = new TextEncoder().encode(JSON.stringify([schedule, gate]));
+    const values = mapping
+      ? [schedule, gate, mappingKey(mapping.schedule), mappingKey(mapping.gate)]
+      : [schedule, gate];
+    const bytes = new TextEncoder().encode(JSON.stringify(values));
     const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
     const fingerprint = Array.from(new Uint8Array(digest), (byte) =>
       byte.toString(16).padStart(2, "0"),
@@ -444,45 +483,130 @@ export function ShiftReview({
   canFocusVehicle = true,
   referenceAt,
 }: ShiftReviewProps) {
-  const [uploaded, setUploaded] = useState<Dataset>();
+  const [uploaded, setUploaded] = useState<ImportedShift>();
   const [pendingFiles, setPendingFiles] = useState<{ schedule?: File; gate?: File }>({});
+  const [draft, setDraft] = useState<ImportDraft>();
+  const [archive, setArchive] = useState(savedShifts);
+  const [deleteKey, setDeleteKey] = useState<string>();
+  const [archiveMessage, setArchiveMessage] = useState<{ text: string; error?: boolean }>();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const dataset = uploaded ?? (mode === "DEMO" ? DEMO_DATASET : undefined);
+  const uploadedKey = uploaded?.storageKey?.split(":").at(-1);
+
+  function selectFile(kind: keyof ImportDraft, file?: File) {
+    setPendingFiles((files) => ({ ...files, [kind]: file }));
+    setDraft(undefined);
+    setMessage("");
+  }
+
+  function updateDraft(kind: keyof ImportDraft, patch: Partial<ImportSource>) {
+    setDraft((current) => current && { ...current, [kind]: { ...current[kind], ...patch } });
+    setMessage("");
+  }
+
+  async function readFiles(): Promise<ImportDraft> {
+    const { schedule, gate } = pendingFiles;
+    if (!schedule || !gate) throw new Error("Selecione os dois arquivos CSV.");
+    if (schedule.size > FILE_LIMIT || gate.size > FILE_LIMIT) {
+      throw new Error("Use arquivos CSV de até 2 MB cada.");
+    }
+    const [scheduleText, gateText] = await Promise.all([schedule.text(), gate.text()]);
+    return { schedule: importSource(scheduleText, "Escala"), gate: importSource(gateText, "Portaria") };
+  }
+
+  function activateShift(schedule: ScheduleRow[], gate: GateRow[], storageKey: string | null) {
+    setUploaded({ schedule, gate, storageKey, cases: reconcileShift(schedule, gate), isDemo: false });
+    setPendingFiles({});
+    setDraft(undefined);
+    setRevision((previous) => previous + 1);
+  }
 
   async function importFiles(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const { schedule, gate } = pendingFiles;
-    if (busy || !schedule || !gate) return;
+    if (busy || !pendingFiles.schedule || !pendingFiles.gate) return;
     setMessage("");
+    setArchiveMessage(undefined);
     setBusy(true);
     try {
-      if (schedule.size > FILE_LIMIT || gate.size > FILE_LIMIT) {
-        throw new Error("Use arquivos CSV de até 2 MB cada.");
+      const files = draft ?? await readFiles();
+      const { schedule, gate } = files;
+      if (!draft && (!hasCanonicalColumns(schedule, ["trip_id", "vehicle_id", "planned_at"]) ||
+          !hasCanonicalColumns(gate, ["event_id", "vehicle_id", "observed_at", "direction"]))) {
+        setDraft(files);
+        return;
       }
-      const [scheduleText, gateText] = await Promise.all([schedule.text(), gate.text()]);
-      let planned;
+
+      let planned: ScheduleRow[];
       try {
-        planned = parseScheduleCsv(scheduleText);
+        planned = parseScheduleCsv(schedule.text, draft ? { columns: schedule.columns, utcOffset: schedule.utcOffset || undefined } : undefined);
       } catch (error) {
         throw new Error("Escala: " + (error instanceof Error ? error.message : "CSV inválido."));
       }
-      let observed;
+      let observed: GateRow[];
       try {
-        observed = parseGateCsv(gateText);
+        observed = parseGateCsv(gate.text, draft ? { columns: gate.columns, utcOffset: gate.utcOffset || undefined } : undefined);
       } catch (error) {
         throw new Error("Portaria: " + (error instanceof Error ? error.message : "CSV inválido."));
       }
-      const cases = reconcileShift(planned, observed);
-      const storageKey = await datasetStorageKey(scheduleText, gateText);
-      setUploaded({ storageKey, cases, isDemo: false });
-      setPendingFiles({});
-      setRevision((previous) => previous + 1);
+      const storageKey = await datasetStorageKey(schedule.text, gate.text, draft);
+      activateShift(planned, observed, storageKey);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Falha ao revisar os arquivos.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function editMapping() {
+    setMessage("");
+    setBusy(true);
+    try {
+      setDraft(await readFiles());
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Falha ao ler os arquivos.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function keepShift() {
+    if (!uploaded || !uploadedKey) return;
+    try {
+      saveShift(uploadedKey, uploaded.schedule, uploaded.gate);
+      setArchive(savedShifts());
+      setArchiveMessage({ text: "Turno guardado neste navegador." });
+    } catch {
+      setArchiveMessage({ text: "Não foi possível guardar o turno. Exporte a revisão para conservar o resultado.", error: true });
+    }
+  }
+
+  function reopenShift(key: string) {
+    setDeleteKey(undefined);
+    try {
+      const { schedule, gate, storageKey } = readSavedShift(key);
+      activateShift(schedule, gate, storageKey);
+      setMessage("");
+      setArchiveMessage({ text: "Turno guardado reaberto." });
+    } catch {
+      setArchiveMessage({ text: "O turno guardado não está disponível ou contém dados inválidos.", error: true });
+    }
+  }
+
+  function removeShift(key: string) {
+    try {
+      deleteSavedShift(key);
+      if (uploadedKey === key) {
+        setUploaded(undefined);
+        setRevision((previous) => previous + 1);
+      }
+      setArchive(savedShifts());
+      setArchiveMessage({ text: "Turno e conclusões removidos deste navegador." });
+    } catch {
+      setArchiveMessage({ text: "Não foi possível excluir o turno neste navegador.", error: true });
+    } finally {
+      setDeleteKey(undefined);
     }
   }
 
@@ -509,23 +633,40 @@ export function ShiftReview({
         <details className="shift-import" key={uploaded ? revision : "import"} open={!dataset ? true : undefined}>
           <summary><FileUp size={16} /> Importar arquivos CSV <ChevronDown size={15} /></summary>
           <form onSubmit={importFiles}>
-            <p>Selecione os dois CSV do mesmo turno. Use datas ISO 8601 com fuso horário.</p>
+            <p>Selecione os dois CSV do mesmo turno. Use datas ISO 8601 com fuso ou mapeie a data local do arquivo.</p>
             <label className="shift-file">
               <span>Arquivo de escala</span>
               <input aria-label="Arquivo de escala" type="file" accept=".csv,text/csv"
-                onChange={(event) => setPendingFiles({ ...pendingFiles, schedule: event.currentTarget.files?.[0] })}
+                disabled={busy}
+                onChange={(event) => selectFile("schedule", event.currentTarget.files?.[0])}
               />
             </label>
             <label className="shift-file">
               <span>Arquivo de portaria</span>
               <input aria-label="Arquivo de portaria" type="file" accept=".csv,text/csv"
-                onChange={(event) => setPendingFiles({ ...pendingFiles, gate: event.currentTarget.files?.[0] })}
+                disabled={busy}
+                onChange={(event) => selectFile("gate", event.currentTarget.files?.[0])}
               />
             </label>
+            {draft && (["schedule", "gate"] as const).map((kind) => (
+              <ShiftImportMapping
+                key={kind}
+                kind={kind}
+                columns={draft[kind].inspection.headers}
+                mapping={draft[kind].columns}
+                onChange={(columns) => updateDraft(kind, { columns })}
+                sample={draft[kind].inspection.sample}
+                utcOffset={draft[kind].utcOffset}
+                onUtcOffsetChange={(utcOffset) => updateDraft(kind, { utcOffset })}
+              />
+            ))}
             {message && <p className="shift-error" role="alert"><AlertCircle size={14} /> {message}</p>}
             <button className="shift-button shift-primary" type="submit" disabled={busy || !pendingFiles.schedule || !pendingFiles.gate}>
-              {busy ? "Revisando…" : "Revisar arquivos"}
+              {busy ? "Revisando…" : draft ? "Revisar com mapeamento" : "Revisar arquivos"}
             </button>
+            {!draft && pendingFiles.schedule && pendingFiles.gate && (
+              <button className="shift-button" type="button" disabled={busy} onClick={editMapping}>Mapear colunas e datas</button>
+            )}
             <div className="shift-templates">
               <button type="button" onClick={() => downloadCsv("modelo-escala.csv", SCHEDULE_TEMPLATE)}>Baixar exemplo de escala</button>
               <button type="button" onClick={() => downloadCsv("modelo-portaria.csv", GATE_TEMPLATE)}>Baixar exemplo de portaria</button>
@@ -533,6 +674,39 @@ export function ShiftReview({
             <p className="shift-import-note"><Clock3 size={13} /> Tolerância de {SHIFT_TOLERANCE_MINUTES} min. Os arquivos são processados neste navegador.</p>
           </form>
         </details>
+        {uploadedKey && !archive.some((item) => item.key === uploadedKey) && (
+          <div className="shift-archive-save">
+            <button type="button" className="shift-button" onClick={keepShift}>
+              <Archive size={15} /> Guardar turno neste navegador
+            </button>
+            <span>As colunas usadas ficam neste perfil. Guarde apenas em um dispositivo de confiança.</span>
+          </div>
+        )}
+        {archive.length > 0 && (
+          <section className="shift-archive" aria-label="Turnos guardados">
+            <h3>Turnos guardados</h3>
+            <ul>
+              {archive.map((item) => (
+                <li key={item.key}>
+                  <span>{timestamp(item.plannedAt, true)} · {item.count} {item.count === 1 ? "saída" : "saídas"}</span>
+                  {deleteKey === item.key ? (
+                    <>
+                      <small>Remove o turno e suas conclusões locais.</small>
+                      <button type="button" className="shift-button" onClick={() => removeShift(item.key)}>Confirmar exclusão</button>
+                      <button type="button" className="shift-button" onClick={() => setDeleteKey(undefined)}>Cancelar</button>
+                    </>
+                  ) : (
+                    <>
+                      <button type="button" className="shift-button" onClick={() => reopenShift(item.key)}>Reabrir turno</button>
+                      <button type="button" className="shift-button" onClick={() => setDeleteKey(item.key)}>Excluir turno</button>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {archiveMessage && <p className={archiveMessage.error ? "shift-error" : "shift-decision"} role={archiveMessage.error ? "alert" : "status"}>{archiveMessage.text}</p>}
         {dataset && (
           <DatasetView
             key={dataset.isDemo ? "demo" : revision}
@@ -545,7 +719,7 @@ export function ShiftReview({
           />
         )}
         {uploaded && (
-          <button type="button" className="shift-reset" onClick={() => { setUploaded(undefined); setPendingFiles({}); setMessage(""); }}>
+          <button type="button" className="shift-reset" onClick={() => { setUploaded(undefined); setPendingFiles({}); setDraft(undefined); setMessage(""); setArchiveMessage(undefined); }}>
             {mode === "DEMO" ? "Restaurar demonstração do turno" : "Remover arquivos da revisão"}
           </button>
         )}

@@ -593,3 +593,42 @@
   color: #5b7064;
   font-size: 10px;
 }
+
+.shift-archive-save,
+.shift-archive {
+  display: grid;
+  gap: 6px;
+  padding: 8px 9px;
+  border: 1px solid var(--shift-border);
+  border-radius: 8px;
+  background: #fafcf9;
+}
+.shift-archive-save span,
+.shift-archive li span,
+.shift-archive li small {
+  color: #4c6456;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.shift-archive h3 {
+  margin: 0;
+  color: var(--shift-ink);
+  font-size: 12px;
+}
+.shift-archive ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.shift-archive li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 5px 0;
+}
+.shift-archive li span,
+.shift-archive li small {
+  flex-basis: 100%;
+}

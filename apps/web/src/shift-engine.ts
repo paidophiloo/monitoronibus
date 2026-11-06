@@ -45,6 +45,54 @@ export interface ShiftDecision {
   note: string;
 }
 
+export interface ScheduleColumns {
+  trip_id: string;
+  vehicle_id: string;
+  planned_at: string;
+  route?: string;
+}
+
+export interface GateColumns {
+  event_id: string;
+  vehicle_id: string;
+  observed_at: string;
+  direction: string;
+  trip_id?: string;
+}
+
+interface MappedCsvOptions<Columns> {
+  columns: Partial<Columns>;
+  utcOffset?: string;
+}
+
+const SCHEDULE_REQUIRED = ["trip_id", "vehicle_id", "planned_at"] as const;
+const GATE_REQUIRED = ["event_id", "vehicle_id", "observed_at", "direction"] as const;
+const VEHICLE_ALIASES = [
+  "veiculo", "id_veiculo", "id_do_veiculo", "codigo_veiculo", "prefixo",
+  "prefixo_veiculo", "prefixo_do_veiculo", "numero_veiculo",
+];
+const TRIP_ALIASES = ["viagem", "id_viagem", "id_da_viagem", "codigo_viagem", "numero_viagem"];
+const SCHEDULE_ALIASES: Record<keyof ScheduleColumns, readonly string[]> = {
+  trip_id: TRIP_ALIASES,
+  vehicle_id: VEHICLE_ALIASES,
+  planned_at: [
+    "saida_prevista", "saida_planejada", "horario_previsto", "horario_planejado",
+    "data_hora_prevista", "data_hora_planejada",
+  ],
+  route: ["linha", "codigo_linha", "rota"],
+};
+const GATE_ALIASES: Record<keyof GateColumns, readonly string[]> = {
+  event_id: ["evento", "id_evento", "codigo_evento", "id_registro", "codigo_registro", "registro"],
+  vehicle_id: VEHICLE_ALIASES,
+  observed_at: [
+    "data_hora", "data_e_hora", "data_hora_evento", "data_hora_registro",
+    "data_hora_passagem", "data_hora_da_passagem", "horario_registro",
+    "hora_registro", "horario_passagem", "hora_passagem", "horario_evento",
+  ],
+  direction: ["direcao", "sentido", "movimento", "tipo_movimento", "tipo_de_movimento", "entrada_saida"],
+  trip_id: TRIP_ALIASES,
+};
+
 function detectDelimiter(text: string): "," | ";" {
   let quoted = false;
   let commas = 0;
@@ -121,28 +169,98 @@ function parseCsv(text: string): string[][] {
 
 type CsvFields = (column: string) => string;
 
-function readTable<Row>(
-  text: string,
-  required: string[],
-  read: (get: CsvFields, row: number) => Row,
-): Row[] {
+function csvTable(text: string) {
   const [header, ...rows] = parseCsv(text);
   if (!header) throw new Error("O CSV está vazio.");
-
-  const columns = header.map((value) => value.trim().toLowerCase());
-  const indexes = new Map(columns.map((name, index) => [name, index]));
-  if (indexes.size !== columns.length || indexes.has("")) {
+  const headers = header.map((value) => value.trim());
+  const normalized = new Set(headers.map((name) => name.toLowerCase()));
+  if (normalized.size !== headers.length || normalized.has("")) {
     throw new Error("O cabeçalho contém colunas duplicadas ou sem nome.");
+  }
+  return { headers, rows };
+}
+
+function validateRowWidth(values: string[], headers: string[], record: number) {
+  if (values.length !== headers.length) {
+    throw new Error(`Registro ${record}: quantidade de campos diferente do cabeçalho.`);
+  }
+}
+
+export function inspectShiftCsv(text: string): { headers: string[]; sample: string[][]; rowCount: number } {
+  const { headers, rows } = csvTable(text);
+  rows.forEach((values, index) => validateRowWidth(values, headers, index + 2));
+  return { headers, sample: rows.slice(0, 3), rowCount: rows.length };
+}
+
+function foldLabel(value: string): string {
+  return value.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+}
+
+function normalizeLabel(value: string): string {
+  return foldLabel(value)
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function suggestMapping<Key extends string>(
+  headers: readonly string[],
+  aliases: Record<Key, readonly string[]>,
+): Partial<Record<Key, string>> {
+  const suggestion: Partial<Record<Key, string>> = {};
+  const normalized = headers.map(normalizeLabel);
+  for (const key of Object.keys(aliases) as Key[]) {
+    const exact = headers.find((header) => header.trim().toLowerCase() === key);
+    if (exact) {
+      suggestion[key] = exact;
+      continue;
+    }
+    const candidates = headers.filter((_, index) =>
+      normalized[index] === key || aliases[key].includes(normalized[index]),
+    );
+    if (candidates.length === 1) suggestion[key] = candidates[0];
+  }
+  return suggestion;
+}
+
+export function suggestScheduleMapping(headers: readonly string[]): Partial<ScheduleColumns> {
+  return suggestMapping(headers, SCHEDULE_ALIASES);
+}
+
+export function suggestGateMapping(headers: readonly string[]): Partial<GateColumns> {
+  return suggestMapping(headers, GATE_ALIASES);
+}
+
+function readTable<Row>(
+  text: string,
+  required: readonly string[],
+  read: (get: CsvFields, row: number) => Row,
+  mapping?: Readonly<Record<string, string | undefined>>,
+): Row[] {
+  const { headers, rows } = csvTable(text);
+  const indexes = new Map<string, number>();
+  if (mapping) {
+    const mappedIndexes = new Set<number>();
+    for (const [field, header] of Object.entries(mapping)) {
+      if (!header) continue;
+      const index = headers.indexOf(header);
+      if (index < 0) throw new Error(`A coluna selecionada para ${field} não existe: ${header}.`);
+      if (mappedIndexes.has(index)) throw new Error(`Cada campo precisa de uma coluna distinta: ${header}.`);
+      mappedIndexes.add(index);
+      indexes.set(field, index);
+    }
+  } else {
+    headers.forEach((header, index) => indexes.set(header.toLowerCase(), index));
   }
 
   const missing = required.filter((name) => !indexes.has(name));
-  if (missing.length) throw new Error(`Colunas obrigatórias ausentes: ${missing.join(", ")}.`);
+  if (missing.length) {
+    const message = mapping ? "Selecione as colunas obrigatórias" : "Colunas obrigatórias ausentes";
+    throw new Error(`${message}: ${missing.join(", ")}.`);
+  }
 
   return rows.map((values, index) => {
     const record = index + 2;
-    if (values.length !== columns.length) {
-      throw new Error(`Registro ${record}: quantidade de campos diferente do cabeçalho.`);
-    }
+    validateRowWidth(values, headers, record);
     return read((name) => (values[indexes.get(name) ?? -1] ?? "").trim(), record);
   });
 }
@@ -154,7 +272,19 @@ function identifier(value: string, column: string, record: number): string {
   return value;
 }
 
-function timestamp(value: string, column: string, record: number): string {
+function timestamp(value: string, column: string, record: number, localClock?: { utcOffset?: string }): string {
+  if (localClock) {
+    const brazilian = /^(\d{2})\/(\d{2})\/(\d{4})[ \t]+(\d{2}:\d{2})(?::(\d{2}))?$/.exec(value);
+    if (brazilian) {
+      const { utcOffset } = localClock;
+      if (!utcOffset) {
+        throw new Error(`Registro ${record}: selecione um fuso explícito para a data brasileira em ${column}.`);
+      }
+      const [, day, month, year, hourMinute, second = "00"] = brazilian;
+      value = `${year}-${month}-${day}T${hourMinute}:${second}${utcOffset}`;
+    }
+  }
+
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/.exec(value);
   if (match) {
     const [, year, month, day, hour, minute, second = "0", zone] = match;
@@ -181,23 +311,30 @@ function timestamp(value: string, column: string, record: number): string {
   throw new Error(`Registro ${record}: ${column} deve usar ISO 8601 com fuso explícito (Z ou -03:00).`);
 }
 
+function validateUtcOffset(utcOffset: string | undefined) {
+  if (utcOffset !== undefined && !/^(?:Z|[+-](?:(?:0\d|1[0-3]):[0-5]\d|14:00))$/.test(utcOffset)) {
+    throw new Error("O fuso para datas brasileiras deve ser Z ou um deslocamento explícito como -03:00.");
+  }
+}
+
 function validateUniqueId(seen: Set<string>, id: string, column: string, record: number) {
   if (seen.has(id)) throw new Error(`Registro ${record}: ${column} duplicado (${id}).`);
   seen.add(id);
 }
 
-export function parseScheduleCsv(text: string): ScheduleRow[] {
+export function parseScheduleCsv(text: string, options?: MappedCsvOptions<ScheduleColumns>): ScheduleRow[] {
+  validateUtcOffset(options?.utcOffset);
   const seen = new Set<string>();
-  const rows = readTable(text, ["trip_id", "vehicle_id", "planned_at"], (get, record) => {
+  const rows = readTable(text, SCHEDULE_REQUIRED, (get, record) => {
     const tripId = identifier(get("trip_id"), "trip_id", record);
     validateUniqueId(seen, tripId, "trip_id", record);
     return {
       tripId,
       vehicleId: identifier(get("vehicle_id"), "vehicle_id", record),
-      plannedAt: timestamp(get("planned_at"), "planned_at", record),
+      plannedAt: timestamp(get("planned_at"), "planned_at", record, options),
       route: get("route") || undefined,
     };
-  });
+  }, options ? { ...options.columns } : undefined);
   if (!rows.length) throw new Error("A escala precisa ter pelo menos uma saída planejada.");
   const times = rows.map(({ plannedAt }) => Date.parse(plannedAt));
   if (Math.max(...times) - Math.min(...times) >= SHIFT_MAX_SPAN_HOURS * 60 * MINUTE) {
@@ -206,24 +343,28 @@ export function parseScheduleCsv(text: string): ScheduleRow[] {
   return rows;
 }
 
-export function parseGateCsv(text: string): GateRow[] {
+export function parseGateCsv(text: string, options?: MappedCsvOptions<GateColumns>): GateRow[] {
+  validateUtcOffset(options?.utcOffset);
   const seen = new Set<string>();
-  return readTable(text, ["event_id", "vehicle_id", "observed_at", "direction"], (get, record) => {
+  return readTable(text, GATE_REQUIRED, (get, record) => {
     const eventId = identifier(get("event_id"), "event_id", record);
     validateUniqueId(seen, eventId, "event_id", record);
-    const direction = get("direction").toUpperCase();
+    const inputDirection = get("direction");
+    const label = options ? foldLabel(inputDirection) : "";
+    const direction = label === "entrada" ? "IN" : label === "saida" ? "OUT" : inputDirection.toUpperCase();
     if (direction !== "IN" && direction !== "OUT") {
-      throw new Error(`Registro ${record}: direction deve ser IN ou OUT.`);
+      const allowed = options ? "IN, OUT, Entrada ou Saída" : "IN ou OUT";
+      throw new Error(`Registro ${record}: direction deve ser ${allowed}.`);
     }
     const tripId = get("trip_id");
     return {
       eventId,
       vehicleId: identifier(get("vehicle_id"), "vehicle_id", record),
-      observedAt: timestamp(get("observed_at"), "observed_at", record),
+      observedAt: timestamp(get("observed_at"), "observed_at", record, options),
       direction,
       tripId: tripId ? identifier(tripId, "trip_id", record) : undefined,
     };
-  });
+  }, options ? { ...options.columns } : undefined);
 }
 
 function append<Key, Value>(index: Map<Key, Value[]>, key: Key, value: Value) {
