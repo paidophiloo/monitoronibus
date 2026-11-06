@@ -4,21 +4,42 @@ Visualização 3D de operações de ônibus para equipes de mobilidade urbana. O
 
 ## Executar
 
-Requisitos: Node 24, pnpm 11.25.0, Python 3.12 e navegador com WebGL 2.
+Para usar o DEMO e a revisão de turno, execute na pasta que contém o `package.json`. Use Node 24, pnpm 11.25.0 e um navegador com WebGL 2.
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm dev
+```
+
+No PowerShell, use `pnpm.cmd` se a execução de scripts estiver bloqueada. Abra o endereço da linha `Local` impresso pelo Vite.
+
+Para ativar os modos de GPS LIVE e REPLAY, inicie também o backend em outro terminal com Python 3.12.
+
+```sh
 python -m pip install -r services/api/requirements-dev.txt
 python -m uvicorn app.main:app --app-dir services/api --host 127.0.0.1 --port 8000
 ```
 
-Em outro terminal:
+Para o build, execute `pnpm build`. Em um deploy, sirva `apps/web/dist` e encaminhe `/api` e `/health` ao FastAPI na mesma origem. O Vite já faz esse proxy em dev e preview. O FastAPI desta entrega usa **um processo** para manter uma sessão e um coletor upstream.
 
-```sh
-pnpm dev
-```
+## Fechamento de turno
 
-Abra o URL impresso pelo Vite. Para o build, execute `pnpm build`. Em um deploy, sirva `apps/web/dist` e encaminhe `/api` e `/health` ao FastAPI na mesma origem. O Vite já faz esse proxy em dev e preview. O FastAPI desta entrega usa **um processo** para manter uma sessão e um coletor upstream.
+Abra **Revisar turno** no painel lateral para experimentar a fila com dados sintéticos identificados. Selecione uma saída para consultar escala, portaria e posição disponível na cena. Registre uma conclusão e exporte a revisão. O CSV de exportação registra a leitura de portaria e a decisão humana em campos separados.
+
+Para revisar seus dados, carregue um par de CSVs UTF-8 com vírgula ou ponto e vírgula. O painel oferece modelos de ambos.
+
+| Arquivo | Colunas obrigatórias | Coluna opcional |
+|---|---|---|
+| Escala | `trip_id,vehicle_id,planned_at` | `route` |
+| Portaria | `event_id,vehicle_id,observed_at,direction` | `trip_id` |
+
+Use um identificador de veículo consistente nos dois arquivos, IDs únicos por saída/evento e datas ISO 8601 com fuso, como `2026-11-06T06:00:00-03:00`. A escala deve conter um único turno, com intervalo inferior a 24 horas. A direção da portaria é `IN` ou `OUT`. Um arquivo de portaria com apenas o cabeçalho representa ausência de registros.
+
+- **Vínculo por saída.** Um registro `OUT` com `trip_id` tem prioridade. Registros duplicados para a mesma saída, veículo diferente da escala ou horário fora de −60 a +180 minutos aparecem como divergências.
+- **Vínculo por veículo e horário.** Sem `trip_id`, a janela é de −15 a +60 minutos. O vínculo exige um candidato único em ambos os sentidos. Acima de cinco minutos de atraso, a saída vinculada aparece como atrasada. Mais de cinco minutos de antecedência exige revisão.
+- **Evidência.** A passagem é confirmada pelo registro de portaria aceito na conciliação. A observação GPS complementa a investigação. Uma saída da garagem é distinta do início da viagem comercial. Uma saída sem registro suficiente permanece sem confirmação.
+
+Os arquivos de entrada são processados no navegador. As conclusões são locais ao perfil do navegador e ao conjunto de dados. Após recarregar a página, reimporte os mesmos arquivos para recuperar as conclusões daquele turno. Exporte a revisão para guardá-la fora do navegador.
 
 ## Modos de dados
 

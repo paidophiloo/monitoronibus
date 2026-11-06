@@ -3,12 +3,13 @@ import "@fontsource/ibm-plex-mono/latin-400.css";
 import "@fontsource/ibm-plex-mono/latin-500.css";
 import "./style.css";
 import { createRoot } from "react-dom/client";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDownRight,
   BusFront,
   ChevronRight,
   CircleHelp,
+  ClipboardCheck,
   Clock3,
   Crosshair,
   History,
@@ -23,6 +24,7 @@ import {
 } from "lucide-react";
 import { fleet } from "./fleet";
 import { Scene, type CameraAction } from "./scene";
+import { ShiftReview } from "./shift-review";
 
 import { observedVehicles, useObservations, type Mode } from "./observations";
 
@@ -74,7 +76,9 @@ function App() {
   const [mode, setMode] = useState<Mode>("DEMO");
   const [selected, setSelected] = useState<string | null>("8 2361");
   const [action, setAction] = useState<CameraAction>({ type: "home" });
-  const [panel, setPanel] = useState<"overview" | "fleet">("overview");
+  const [panel, setPanel] = useState<"overview" | "fleet" | "shift">(
+    "overview",
+  );
   const [help, setHelp] = useState(false);
   const [ready, setReady] = useState(false);
   const onReady = useCallback(() => setReady(true), []);
@@ -89,6 +93,26 @@ function App() {
   const site = demo ? "Pátio Leste" : (area?.name ?? "Área operacional");
   const noData = !demo && !vehicles.length;
   const vehicle = vehicles.find((item) => item.id === selected);
+  const reviewing = panel === "shift";
+  const reviewEntry = useRef<HTMLButtonElement>(null);
+  const reviewRegion = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (reviewing) reviewRegion.current?.focus();
+  }, [reviewing]);
+
+  function closeReview() {
+    setPanel("overview");
+    reviewEntry.current?.focus();
+  }
+
+  function focusReviewVehicle(vehicleId: string) {
+    const target = vehicles.find((item) => item.id === vehicleId);
+    if (target) {
+      setSelected(target.id);
+      setAction({ type: "focus", vehicle: target });
+    }
+  }
+
   function chooseMode(next: Mode) {
     setMode(next);
     setAt("");
@@ -159,8 +183,21 @@ function App() {
           >
             <List size={20} />
           </button>
+          <button
+            className="icon"
+            ref={reviewEntry}
+            aria-label="Fechamento de turno"
+            title="Fechamento de turno"
+            aria-pressed={reviewing}
+            onClick={() => setPanel("shift")}
+          >
+            <ClipboardCheck size={20} />
+          </button>
         </nav>
-        <section className="workspace" aria-label="Visão do pátio">
+        <section
+          className={reviewing ? "workspace workspace-review" : "workspace"}
+          aria-label="Visão do pátio"
+        >
           <div className="viewport" data-ready={ready}>
             <Scene
               vehicles={vehicles}
@@ -240,7 +277,28 @@ function App() {
               <span>Arraste para girar · botão direito para deslocar</span>
             </div>
           </div>
-          <aside className="side" aria-label="Contexto do pátio">
+          <aside
+            className="side"
+            aria-label="Painel de revisão"
+            hidden={!reviewing}
+            ref={reviewRegion}
+            tabIndex={-1}
+          >
+            <ShiftReview
+              key={mode}
+              mode={mode}
+              vehicles={vehicles}
+              canFocusVehicle={ready && !failed3d}
+              referenceAt={mode === "REPLAY" ? snapshot?.at : undefined}
+              onFocusVehicle={focusReviewVehicle}
+              onClose={closeReview}
+            />
+          </aside>
+          <aside
+            className="side"
+            aria-label="Contexto do pátio"
+            hidden={reviewing}
+          >
             {demo && (
               <div className="map-card">
                 <SiteMap />
@@ -429,6 +487,18 @@ function App() {
                 </p>
               )}
             </section>
+            <button
+              className="shift-entry"
+              aria-label="Revisar turno"
+              onClick={() => setPanel("shift")}
+            >
+              <ClipboardCheck size={19} />
+              <span>
+                <strong>Revisar turno</strong>
+                <small>Compare escala e registros de portaria</small>
+              </span>
+              <ChevronRight size={16} />
+            </button>
             <div className="provenance">
               <Clock3 size={15} />
               <div>

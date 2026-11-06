@@ -700,3 +700,53 @@ button:disabled {
 .inspection button:disabled {
   opacity: 0.55;
 }
+
+.shift-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  text-align: left;
+  color: #124c3a;
+  background: #e8f4ed;
+  border: 1px solid #cfe5d7;
+  border-radius: 13px;
+}
+.shift-entry span {
+  display: grid;
+  gap: 3px;
+  flex: 1;
+}
+.shift-entry strong {
+  font-size: 12px;
+}
+.shift-entry small {
+  font-size: 10px;
+  color: var(--muted);
+}
+.side[hidden] {
+  display: none;
+}
+.workspace-review > .side:focus {
+  outline: none;
+}
+@media (min-width: 721px) {
+  .workspace.workspace-review {
+    grid-template-columns: minmax(0, 1fr) clamp(310px, 29vw, 382px);
+  }
+  .workspace-review > .side {
+    min-width: 0;
+    max-height: calc(100svh - 132px);
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+}
+@media (max-width: 720px) {
+  .workspace-review > .side:not([hidden]) {
+    display: block;
+  }
+  .shift-entry {
+    grid-column: 1 / -1;
+  }
+}
