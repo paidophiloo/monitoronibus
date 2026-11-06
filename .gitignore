@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+test-results/
+playwright-report/
+
+# User-supplied moodboards are separate from the shipping code.
+references/

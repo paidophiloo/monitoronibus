@@ -1,0 +1,30 @@
+name: Build and verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm install -g pnpm@11.25.0
+      - run: pnpm install --frozen-lockfile
+      - run: python -m pip install -r services/api/requirements-dev.txt
+      - run: pnpm build
+      - run: cd services/api && python -m pytest -q
+      - run: pnpm --filter @patio/web exec playwright install --with-deps chromium
+      - run: pnpm test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-qa
+          path: |
+            docs/qa/*.png
+            apps/web/test-results/

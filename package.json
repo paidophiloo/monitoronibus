@@ -1,0 +1,1 @@
+{"name":"patio-monitor","private":true,"scripts":{"build":"pnpm --filter @patio/web build","dev":"pnpm --filter @patio/web dev","test":"pnpm --filter @patio/web test"}}
